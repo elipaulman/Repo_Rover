@@ -1,0 +1,82 @@
+name: Sync fork (auto, keep workflows)
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:       # allow manual run
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-fork
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/nicholasrmccracken/capstone-ai.git || \
+          git remote set-url upstream https://github.com/nicholasrmccracken/capstone-ai.git
+          git fetch upstream
+          git fetch origin
+
+      - name: Ensure on main tracking origin
+        run: |
+          git checkout -B main origin/main
+
+      - name: Try fast-forward
+        id: ff
+        run: |
+          set +e
+          git merge --ff-only upstream/main
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Auto-merge (prefer upstream), then restore workflows
+        if: ${{ steps.ff.outputs.status != '0' }}
+        run: |
+          set -e
+          # 1) Merge preferring upstream ("theirs") for conflicts
+          set +e
+          git merge -X theirs upstream/main
+          MERGE_RC=$?
+          set -e
+
+          if [ $MERGE_RC -ne 0 ]; then
+            # If there are still conflicts, force accept upstream for all files...
+            git checkout --theirs .
+          fi
+
+          # 2) Restore our workflow files so they NEVER get overwritten
+          if [ -d .github/workflows ]; then
+            git checkout --ours .github/workflows || true
+          fi
+
+          # 3) Stage everything and commit if there are changes
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync upstream/main (prefer upstream; preserve local workflows)"
+          fi
+
+      - name: Push updates
+        run: |
+          # Only push if we're ahead of origin
+          AHEAD=$(git rev-list --left-right --count origin/main...HEAD | awk '{print $1}')
+          if [ "$AHEAD" != "0" ]; then
+            git push origin main
+          else
+            echo "Nothing to push."
+          fi
